@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Form
+from fastapi import FastAPI, Request, Form, Query
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -89,22 +89,31 @@ def tourist_login_post(request: Request, email: str = Form(...), password: str =
     row = cur.fetchone()
     if not row:
         return templates.TemplateResponse("login.html", {"request": request, "role":"tourist", "error":"Invalid credentials"})
-    return RedirectResponse(url=f"/tourist/dashboard?uid={row['id']}", status_code=303)
+    return RedirectResponse(url=f"/tourist_dashboard?uid={row['id']}", status_code=303)
 
-# Dashboard
-@app.get("/tourist/dashboard")
-def tourist_dashboard(request: Request, uid: int = None):
+# ---------------- Tourist Dashboard ----------------
+@app.get("/tourist_dashboard")
+def tourist_dashboard(request: Request, uid: int = Query(...)):
     conn = get_db()
     cur = conn.cursor()
-    user = None
-    if uid:
-        cur.execute("SELECT * FROM users WHERE id=?", (uid,))
-        user = cur.fetchone()
-    cur.execute("SELECT f.*, u.fullname FROM feedback f LEFT JOIN users u ON f.user_id=u.id ORDER BY f.id DESC")
+    
+    # Fetch user info
+    cur.execute("SELECT * FROM users WHERE id=?", (uid,))
+    user = cur.fetchone()
+    if not user:
+        return RedirectResponse(url="/tourist/login", status_code=303)
+    
+    # Fetch feedbacks
+    cur.execute("SELECT f.*, u.fullname FROM feedback f LEFT JOIN users u ON f.user_id=u.id WHERE f.user_id=? ORDER BY f.id DESC", (uid,))
     feedbacks = cur.fetchall()
-    return templates.TemplateResponse("tourist_dashboard.html", {"request": request, "user": user, "feedbacks": feedbacks})
+    conn.close()
+    
+    return templates.TemplateResponse(
+        "tourist_dashboard.html",
+        {"request": request, "user": user, "feedbacks": feedbacks}
+    )
 
-# Submit feedback
+# ---------------- Submit Feedback ----------------
 @app.post("/tourist/submit_feedback")
 def submit_feedback(
     request: Request,
@@ -126,60 +135,55 @@ def submit_feedback(
         uid, location, visit_date, rating, category, comment, recommend, datetime.datetime.utcnow().isoformat()
     ))
     conn.commit()
-    return RedirectResponse(url=f"/tourist/dashboard?uid={uid}", status_code=303)
+    conn.close()
+    
+    return RedirectResponse(url=f"/tourist/analysis?uid={uid}", status_code=303)
 
 # ---------------- Feedback Analysis ----------------
 @app.get("/tourist/analysis")
-def analysis_page(request: Request, uid: int = None):
+def analysis_page(request: Request, uid: int = Query(...)):
     conn = get_db()
     cur = conn.cursor()
-
-    # Ratings count for chart
-    ratings = [0, 0, 0, 0, 0]
+    
+    # User fetch
+    cur.execute("SELECT * FROM users WHERE id=?", (uid,))
+    user = cur.fetchone()
+    
+    # Ratings count
+    ratings = [0,0,0,0,0]
     cur.execute("SELECT rating, COUNT(*) as cnt FROM feedback GROUP BY rating")
-    rows = cur.fetchall()
-    for row in rows:
-        if 1 <= row["rating"] <= 5:
-            ratings[row["rating"] - 1] = row["cnt"]
-
+    for row in cur.fetchall():
+        if 1 <= row["rating"] <=5:
+            ratings[row["rating"]-1] = row["cnt"]
+    
     # Total feedback
     cur.execute("SELECT COUNT(*) as total_feedback FROM feedback")
     total_feedback = cur.fetchone()["total_feedback"]
-
+    
     # Average rating
     cur.execute("SELECT AVG(rating) as avg_rating FROM feedback")
     avg_rating = cur.fetchone()["avg_rating"]
-    avg_rating = round(avg_rating, 2) if avg_rating else 0
-
+    avg_rating = round(avg_rating,2) if avg_rating else 0
+    
     # Total places visited
     cur.execute("SELECT COUNT(DISTINCT location) as places_count FROM feedback")
     places_count = cur.fetchone()["places_count"]
-
-    # Category counts
-    cur.execute("SELECT category, COUNT(*) as cnt FROM feedback GROUP BY category")
-    category_rows = cur.fetchall()
-    categories = {row["category"]: row["cnt"] for row in category_rows}
-
-    # Recommendation counts
-    cur.execute("SELECT recommend, COUNT(*) as cnt FROM feedback GROUP BY recommend")
-    recommend_rows = cur.fetchall()
-    recommend = {row["recommend"]: row["cnt"] for row in recommend_rows}
-
+    
+    conn.close()
+    
     return templates.TemplateResponse(
         "analysis.html",
         {
             "request": request,
             "ratings": json.dumps(ratings),
-            "categories": json.dumps(categories),
-            "recommend": json.dumps(recommend),
-            "user": uid,
+            "user": user,
             "total_feedback": total_feedback,
             "avg_rating": avg_rating,
             "places_count": places_count
         }
     )
 
-# Admin login/dashboard
+# ---------------- Admin ----------------
 @app.get("/admin/login")
 def admin_login_get(request: Request):
     return templates.TemplateResponse("login.html", {"request": request, "role":"admin"})
@@ -201,4 +205,5 @@ def admin_dashboard(request: Request):
     cur = conn.cursor()
     cur.execute("SELECT f.*, u.fullname FROM feedback f LEFT JOIN users u ON f.user_id=u.id ORDER BY f.id DESC")
     feedbacks = cur.fetchall()
+    conn.close()
     return templates.TemplateResponse("admin_dashboard.html", {"request": request, "feedbacks": feedbacks})
